@@ -83,7 +83,7 @@ with st.sidebar:
 
     st.subheader("2. Pantauan Saham (Watchlist)")
     st.write("Masukkan kode saham pisahkan dengan koma.")
-    default_tickers = "BBCA, BBRI, BMRI, BBNI, TLKM, ASII, ITMG, ADRO, PTBA"
+    default_tickers = "BBCA, BBRI, BMRI, BBNI, TLKM, ASII, ITMG, ADRO, PTBA, SSIA, BESS, DVLA"
     user_tickers = st.text_area("Kode Saham BEI:", value=default_tickers)
     
     # Membersihkan inputan user menjadi list
