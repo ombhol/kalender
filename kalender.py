@@ -7,45 +7,57 @@ import pandas as pd
 # Konfigurasi Halaman Streamlit
 st.set_page_config(page_title="Kalender Deviden Real-Time", page_icon="📈", layout="wide")
 
-st.title("📈 Kalender Ex-Date Deviden (Live Data)")
+st.title("📈 Kalender Ex-Date Deviden")
 st.write("""
-Data ditarik secara otomatis menggunakan server Yahoo Finance.  
-*Catatan Penting:* Tanggal yang tercatat di sistem global biasanya adalah **Ex-Date**. Untuk pasar reguler BEI, **Cum-Date** (batas akhir beli saham untuk dapat deviden) umumnya adalah **1 hari bursa sebelum Ex-Date**.
+Gabungan data otomatis (Yahoo Finance) & Input Manual.  
+*Catatan:* Server global sering terlambat mencatat jadwal emiten BEI. Jika data di Stockbit sudah ada namun di sini belum muncul, Anda bisa menambahkannya di bagian **Data Tambahan Manual** pada script.
 """)
 st.divider()
 
-# --- 1. FUNGSI PENARIKAN DATA YFINANCE (REAL-TIME DENGAN CACHE) ---
-# Menggunakan cache agar aplikasi tidak loading berulang kali dan mencegah limit API
+# --- 1. DATA TAMBAHAN MANUAL (OVERRIDE YFINANCE) ---
+# Masukkan data dari Stockbit yang belum masuk ke Yahoo Finance di sini.
+# Format: "YYYY-MM-DD": [{"ticker": "KODE", "amount": "Rp X"}]
+manual_dividend_data = {
+    # Contoh jadwal (Silakan sesuaikan tanggal akuratnya dari Stockbit):
+    "2026-07-06": [{"ticker": "BESS", "amount": "Rp 15.00"}],
+    "2026-07-15": [{"ticker": "DVLA", "amount": "Rp 114.00"}],
+}
+
+# --- 2. FUNGSI PENARIKAN DATA YFINANCE ---
 @st.cache_data(ttl=3600) 
 def fetch_dividend_data(tickers, year, month):
     div_data = {}
     for ticker in tickers:
         try:
-            # Tambahkan akhiran .JK khusus untuk emiten Bursa Efek Indonesia
             yf_ticker = f"{ticker}.JK" if not ticker.endswith(".JK") else ticker
             stock = yf.Ticker(yf_ticker)
             dividends = stock.dividends
             
             if not dividends.empty:
-                # Iterasi setiap data deviden emiten
                 for date, amount in dividends.items():
-                    if date.year == year and date.month == month:
-                        date_str = date.strftime("%Y-%m-%d")
+                    # PERBAIKAN: Hilangkan zona waktu (timezone) agar tidak meleset hari/bulannya
+                    dt = pd.to_datetime(date).tz_localize(None)
+                    
+                    if dt.year == year and dt.month == month:
+                        date_str = dt.strftime("%Y-%m-%d")
                         if date_str not in div_data:
                             div_data[date_str] = []
                         
                         clean_ticker = ticker.replace(".JK", "")
-                        div_data[date_str].append({
-                            "ticker": clean_ticker, 
-                            "amount": f"Rp {amount:,.2f}" # Format nominal Rupiah
-                        })
+                        
+                        # Cek duplikasi agar tidak dobel
+                        existing_tickers = [item['ticker'] for item in div_data[date_str]]
+                        if clean_ticker not in existing_tickers:
+                            div_data[date_str].append({
+                                "ticker": clean_ticker, 
+                                "amount": f"Rp {amount:,.2f}"
+                            })
         except Exception:
-            # Jika ada emiten yang tidak valid/error, lewati saja
             continue
             
     return div_data
 
-# --- 2. KELAS KALENDER KUSTOM ---
+# --- 3. KELAS KALENDER KUSTOM ---
 class DividendCalendar(calendar.HTMLCalendar):
     def __init__(self, dev_data, year, month):
         super().__init__(calendar.MONDAY)
@@ -63,40 +75,52 @@ class DividendCalendar(calendar.HTMLCalendar):
             if events:
                 badges_html = ""
                 for event in events:
-                    badges_html += f'<div class="dev-badge">{event["ticker"]}</div>'
+                    # Beda warna jika data dari manual vs live yfinance
+                    badge_class = "dev-badge manual" if event.get("is_manual") else "dev-badge live"
+                    badges_html += f'<div class="{badge_class}">{event["ticker"]}</div>'
                 return f'<td class="has-event"><div class="day-number">{day}</div>{badges_html}</td>'
             else:
                 return f'<td><div class="day-number">{day}</div></td>'
 
-# --- 3. UI STREAMLIT (SIDEBAR & KONTEN) ---
+# --- 4. UI STREAMLIT (SIDEBAR & KONTEN) ---
 today = datetime.today()
 
 with st.sidebar:
     st.header("⚙️ Pengaturan")
     
-    st.subheader("1. Pilih Waktu")
     selected_year = st.selectbox("Tahun", range(today.year - 5, today.year + 6), index=5)
     nama_bulan = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", 
                   "Juli", "Agustus", "September", "Oktober", "November", "Desember"]
     selected_month_name = st.selectbox("Bulan", nama_bulan, index=today.month - 1)
     selected_month = nama_bulan.index(selected_month_name) + 1
 
-    st.subheader("2. Pantauan Saham (Watchlist)")
-    st.write("Masukkan kode saham pisahkan dengan koma.")
+    st.subheader("Pantauan Saham")
     default_tickers = "BBCA, BBRI, BMRI, BBNI, TLKM, ASII, ITMG, ADRO, PTBA, SSIA, BESS, DVLA"
     user_tickers = st.text_area("Kode Saham BEI:", value=default_tickers)
-    
-    # Membersihkan inputan user menjadi list
     watchlist = [t.strip().upper() for t in user_tickers.split(",") if t.strip()]
 
-# Mengambil data dari internet ketika tombol diklik atau halaman dimuat
+# Tarik Data Live
 with st.spinner(f'Menarik data deviden untuk bulan {selected_month_name} {selected_year}...'):
     live_dividend_data = fetch_dividend_data(watchlist, selected_year, selected_month)
 
-cal = DividendCalendar(live_dividend_data, selected_year, selected_month)
+# GABUNGKAN DATA LIVE & MANUAL
+combined_data = live_dividend_data.copy()
+for date_str, events in manual_dividend_data.items():
+    dt = datetime.strptime(date_str, "%Y-%m-%d")
+    if dt.year == selected_year and dt.month == selected_month:
+        if date_str not in combined_data:
+            combined_data[date_str] = []
+        
+        for event in events:
+            event["is_manual"] = True
+            # Cek agar tidak dobel jika YF ternyata suatu hari sudah update
+            if not any(e['ticker'] == event['ticker'] for e in combined_data[date_str]):
+                combined_data[date_str].append(event)
+
+cal = DividendCalendar(combined_data, selected_year, selected_month)
 html_calendar = cal.formatmonth(selected_year, selected_month)
 
-# --- 4. CUSTOM CSS ---
+# --- 5. CUSTOM CSS ---
 custom_css = """
 <style>
     table.month { width: 100%; text-align: center; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; border-collapse: collapse; margin-top: 10px; }
@@ -106,11 +130,12 @@ custom_css = """
     td:hover { background-color: #f9fafb; }
     .day-number { font-weight: bold; color: #111827; text-align: left; margin-bottom: 5px; }
     .has-event { background-color: #ecfdf5; }
-    .dev-badge { background-color: #10B981; color: white; padding: 3px 6px; border-radius: 4px; font-size: 12px; font-weight: bold; margin-bottom: 4px; display: inline-block; width: 100%; box-sizing: border-box; }
+    .dev-badge { color: white; padding: 3px 6px; border-radius: 4px; font-size: 12px; font-weight: bold; margin-bottom: 4px; display: inline-block; width: 100%; box-sizing: border-box; }
+    .dev-badge.live { background-color: #10B981; } /* Warna Hijau untuk YFinance */
+    .dev-badge.manual { background-color: #F59E0B; } /* Warna Orange untuk Input Manual */
 </style>
 """
 
-# Layout Split
 col_cal, col_detail = st.columns([2, 1])
 
 with col_cal:
@@ -119,14 +144,16 @@ with col_cal:
 
 with col_detail:
     st.subheader(f"Detail Deviden")
+    st.markdown("<span style='color:#10B981;'>■</span> Live Data (YFinance) &nbsp; <span style='color:#F59E0B;'>■</span> Manual Data", unsafe_allow_html=True)
+    st.divider()
     
-    if live_dividend_data:
-        # Mengurutkan tanggal deviden dari yang paling awal di bulan tersebut
-        for date_str in sorted(live_dividend_data.keys()):
-            events = live_dividend_data[date_str]
+    if combined_data:
+        for date_str in sorted(combined_data.keys()):
+            events = combined_data[date_str]
             dt = datetime.strptime(date_str, "%Y-%m-%d")
             with st.expander(f"📅 {dt.strftime('%d %b %Y')}", expanded=True):
                 for event in events:
-                    st.markdown(f"**{event['ticker']}** : {event['amount']} / lembar")
+                    source = "(Manual)" if event.get("is_manual") else "(Live)"
+                    st.markdown(f"**{event['ticker']}** : {event['amount']} {source}")
     else:
-        st.info("Tidak ada riwayat atau jadwal deviden untuk emiten pantauan Anda pada bulan ini.")
+        st.info("Tidak ada jadwal deviden yang tercatat pada bulan ini.")
